@@ -55,7 +55,7 @@ TinyVMM is the simplest possible hypervisor that actually runs guest code. It ru
 │  │           │  hv_vcpu_get/set_reg()  │                                   │ │
 │  │           └────────────┬────────────┘                                   │ │
 │  └────────────────────────┼────────────────────────────────────────────────┘ │
-│                           │ system calls                                     │
+│                           │ hypercalls                                       │
 ├───────────────────────────┼──────────────────────────────────────────────────┤
 │                           ▼                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
@@ -91,7 +91,7 @@ TinyVMM is the simplest possible hypervisor that actually runs guest code. It ru
 │  └──────────────────┘                                                        │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-What runs inside each VM (no guest OS!):
+What runs inside each VM (no guest OS! -> ):
 ┌─────────────────────────────────────┐
 │    Just bare-metal ARM64 code:      │
 │    - Runs at EL1 (kernel mode)      │
