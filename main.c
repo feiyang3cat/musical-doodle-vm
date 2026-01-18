@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <mach/mach_time.h>
@@ -39,11 +40,18 @@
 /* Guest memory size: 1MB is plenty for our tiny guest */
 #define GUEST_MEM_SIZE      (1 * 1024 * 1024)
 
+/* Maximum number of vCPUs per VM */
+#define MAX_VCPUS           2
+
 /* Guest physical address where we load code */
 #define GUEST_CODE_ADDR     0x10000
 
-/* Stack grows down from end of memory */
+/* Second entry point for VM2's second vCPU (offset from GUEST_CODE_ADDR) */
+#define GUEST_CODE2_OFFSET  0x1000
+
+/* Stack grows down from end of memory (each vCPU gets its own stack area) */
 #define GUEST_STACK_ADDR    (GUEST_MEM_SIZE - 0x1000)
+#define GUEST_STACK2_ADDR   (GUEST_MEM_SIZE - 0x2000)
 
 /* ARM64 Exception Syndrome Register (ESR) bit field extraction */
 #define ESR_EC_SHIFT        26
@@ -233,18 +241,212 @@ static const uint32_t guest_code[] = {
     0x14000000,     /* b . */
 };
 
+/*
+ * Guest code for VM 2: Dual vCPU parallel computation
+ *
+ * vCPU 0 entry: Computes sum of even numbers (0+2+4+6+8 = 20)
+ * vCPU 1 entry: Computes sum of odd numbers (1+3+5+7+9 = 25)
+ *
+ * Input registers (set by VMM):
+ *   X20 = VM ID (always 2)
+ *   X21 = vCPU ID (0 or 1)
+ */
+static const uint32_t guest_code_vm2_vcpu0[] = {
+    /*
+     * vCPU 0: Sum even numbers and print result
+     * Computes: 0 + 2 + 4 + 6 + 8 = 20
+     */
+
+    /* Print "vCPU 0: " */
+    0xd2800ec1,     /* mov x1, #'v' (0x76) */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800c21,     /* mov x1, #'C' (0x43) - using 'C' for CPU */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800a01,     /* mov x1, #'P' (0x50) */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800a81,     /* mov x1, #'U' (0x55) */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800601,     /* mov x1, #'0' - vCPU ID */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800741,     /* mov x1, #':' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Print "even sum = " */
+    0xd2800ca1,     /* mov x1, #'e' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800ec1,     /* mov x1, #'v' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800ca1,     /* mov x1, #'e' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800dc1,     /* mov x1, #'n' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Compute sum: 0+2+4+6+8 */
+    0xd2800013,     /* mov x19, #0 (sum) */
+    0xd2800014,     /* mov x20, #0 (counter, reusing x20) */
+
+    /* loop: add counter to sum, increment by 2 */
+    0x8b140273,     /* add x19, x19, x20 */
+    0x91000a94,     /* add x20, x20, #2 */
+    0xf100291f,     /* cmp x20, #10 */
+    0x54ffffab,     /* b.lt loop (-3 instructions) */
+
+    /* Print result (20 = '2' '0') */
+    0xd2800441,     /* mov x1, #'2' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800601,     /* mov x1, #'0' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800141,     /* mov x1, #'\n' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Exit */
+    0xd2800000,     /* mov x0, #0 */
+    0xd4000002,     /* hvc #0 */
+
+    0x14000000,     /* b . */
+};
+
+static const uint32_t guest_code_vm2_vcpu1[] = {
+    /*
+     * vCPU 1: Sum odd numbers and print result
+     * Computes: 1 + 3 + 5 + 7 + 9 = 25
+     */
+
+    /* Print "vCPU 1: " */
+    0xd2800ec1,     /* mov x1, #'v' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800c21,     /* mov x1, #'C' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800a01,     /* mov x1, #'P' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800a81,     /* mov x1, #'U' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800621,     /* mov x1, #'1' - vCPU ID */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800741,     /* mov x1, #':' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Print "odd sum = " */
+    0xd2800de1,     /* mov x1, #'o' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800c81,     /* mov x1, #'d' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800c81,     /* mov x1, #'d' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Compute sum: 1+3+5+7+9 */
+    0xd2800013,     /* mov x19, #0 (sum) */
+    0xd2800034,     /* mov x20, #1 (counter starts at 1) */
+
+    /* loop: add counter to sum, increment by 2 */
+    0x8b140273,     /* add x19, x19, x20 */
+    0x91000a94,     /* add x20, x20, #2 */
+    0xf100291f,     /* cmp x20, #10 */
+    0x54ffffcb,     /* b.lt loop */
+
+    /* Print result (25 = '2' '5') */
+    0xd2800441,     /* mov x1, #'2' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd28006a1,     /* mov x1, #'5' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800141,     /* mov x1, #'\n' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Exit */
+    0xd2800000,     /* mov x0, #0 */
+    0xd4000002,     /* hvc #0 */
+
+    0x14000000,     /* b . */
+};
+
 /* ============================================================================
  * VMM State
  * ============================================================================ */
 
 typedef struct {
     int id;                     /* VM identifier (1 or 2) */
+    int num_vcpus;              /* Number of vCPUs in this VM */
     void *mem;                  /* Guest memory (host virtual address) */
     size_t mem_size;            /* Size of guest memory */
-    hv_vcpu_t vcpu;             /* vCPU handle */
-    hv_vcpu_exit_t *vcpu_exit;  /* Pointer to exit info structure */
+    hv_vcpu_t vcpus[MAX_VCPUS];             /* vCPU handles */
+    hv_vcpu_exit_t *vcpu_exits[MAX_VCPUS];  /* Pointers to exit info structures */
     bool running;               /* Is the VM still running? */
+    pthread_mutex_t lock;       /* Lock for shared state */
 } vm_state_t;
+
+/* Per-vCPU thread context */
+typedef struct {
+    vm_state_t *vm;
+    int vcpu_idx;               /* Index into vcpus array */
+} vcpu_thread_ctx_t;
 
 /* ============================================================================
  * Error Handling
@@ -276,6 +478,9 @@ static const char *hv_strerror(hv_return_t ret) {
 /* ============================================================================
  * VM Lifecycle Functions
  * ============================================================================ */
+
+/* Forward declaration */
+static int vcpu_init_single(vm_state_t *vm, int vcpu_idx);
 
 /*
  * Initialize the VM: create VM instance and allocate guest memory
@@ -314,49 +519,24 @@ static int vm_init(vm_state_t *vm) {
 }
 
 /*
- * Create and configure the vCPU
+ * Create and configure vCPUs
+ *
+ * For single-vCPU VMs: creates the vCPU here
+ * For multi-vCPU VMs: vCPUs are created in their own threads (required by Hypervisor.framework)
  */
 static int vcpu_init(vm_state_t *vm) {
-    printf("[VM %d] Creating vCPU...\n", vm->id);
+    printf("[VM %d] Creating %d vCPU(s)...\n", vm->id, vm->num_vcpus);
 
-    /* Create the vCPU
-     * The exit pointer will be filled in by the framework
-     */
-    HV_CHECK(hv_vcpu_create(&vm->vcpu, &vm->vcpu_exit, NULL));
-    printf("[VM %d] vCPU created\n", vm->id);
+    /* Initialize mutex for multi-vCPU synchronization */
+    pthread_mutex_init(&vm->lock, NULL);
 
-    /* Set up initial register state
-     *
-     * For ARM64:
-     * - PC: Where to start executing
-     * - SP: Stack pointer
-     * - CPSR: Current program status (we use EL1h = kernel mode with SP_EL1)
-     */
-
-    /* Program counter: point to our guest code */
-    HV_CHECK(hv_vcpu_set_reg(vm->vcpu, HV_REG_PC, GUEST_CODE_ADDR));
-
-    /* Stack pointer (SP_EL0 is used when running at EL1 with SP_EL0 selected) */
-    HV_CHECK(hv_vcpu_set_sys_reg(vm->vcpu, HV_SYS_REG_SP_EL0, GUEST_STACK_ADDR));
-
-    /* CPSR: EL1h mode (bits [3:0] = 0b0101 = EL1 with SP_EL1)
-     * Bit 9 (E) = 0: Little endian
-     * Bit 8 (A) = 0: No SError masking
-     * Bit 7 (I) = 1: IRQ masked (we don't use interrupts)
-     * Bit 6 (F) = 1: FIQ masked
-     */
-    HV_CHECK(hv_vcpu_set_reg(vm->vcpu, HV_REG_CPSR, 0x3c5)); /* EL1h, interrupts masked */
-
-    /* Clear general purpose registers */
-    for (int i = 0; i <= 30; i++) {
-        HV_CHECK(hv_vcpu_set_reg(vm->vcpu, HV_REG_X0 + i, 0));
+    if (vm->num_vcpus == 1) {
+        /* Single vCPU: create it here in the main thread */
+        if (vcpu_init_single(vm, 0) < 0) {
+            return -1;
+        }
     }
-
-    /* Set X20 to VM ID so guest can identify itself */
-    HV_CHECK(hv_vcpu_set_reg(vm->vcpu, HV_REG_X20, vm->id));
-
-    printf("[VM %d] vCPU initialized: PC=0x%x, SP=0x%x\n",
-           vm->id, GUEST_CODE_ADDR, GUEST_STACK_ADDR);
+    /* Multi-vCPU: vCPUs will be created in vcpu_thread_func */
 
     return 0;
 }
@@ -367,18 +547,35 @@ static int vcpu_init(vm_state_t *vm) {
 static int load_guest(vm_state_t *vm) {
     printf("[VM %d] Loading guest code...\n", vm->id);
 
-    /* Copy guest code to the appropriate location in guest memory */
-    size_t code_size = sizeof(guest_code);
+    if (vm->id == 1) {
+        /* VM 1: Single vCPU with simple hello world */
+        size_t code_size = sizeof(guest_code);
 
-    if (GUEST_CODE_ADDR + code_size > vm->mem_size) {
-        fprintf(stderr, "[VM %d] Error: Guest code too large\n", vm->id);
-        return -1;
+        if (GUEST_CODE_ADDR + code_size > vm->mem_size) {
+            fprintf(stderr, "[VM %d] Error: Guest code too large\n", vm->id);
+            return -1;
+        }
+
+        memcpy((uint8_t *)vm->mem + GUEST_CODE_ADDR, guest_code, code_size);
+        printf("[VM %d] Loaded %zu bytes at GPA 0x%x (1 vCPU)\n",
+               vm->id, code_size, GUEST_CODE_ADDR);
+    } else {
+        /* VM 2: Two vCPUs with parallel computation */
+        size_t code0_size = sizeof(guest_code_vm2_vcpu0);
+        size_t code1_size = sizeof(guest_code_vm2_vcpu1);
+
+        /* Load vCPU 0 code at GUEST_CODE_ADDR */
+        memcpy((uint8_t *)vm->mem + GUEST_CODE_ADDR,
+               guest_code_vm2_vcpu0, code0_size);
+        printf("[VM %d] Loaded %zu bytes at GPA 0x%x (vCPU 0: even sum)\n",
+               vm->id, code0_size, GUEST_CODE_ADDR);
+
+        /* Load vCPU 1 code at GUEST_CODE_ADDR + GUEST_CODE2_OFFSET */
+        memcpy((uint8_t *)vm->mem + GUEST_CODE_ADDR + GUEST_CODE2_OFFSET,
+               guest_code_vm2_vcpu1, code1_size);
+        printf("[VM %d] Loaded %zu bytes at GPA 0x%x (vCPU 1: odd sum)\n",
+               vm->id, code1_size, GUEST_CODE_ADDR + GUEST_CODE2_OFFSET);
     }
-
-    memcpy((uint8_t *)vm->mem + GUEST_CODE_ADDR, guest_code, code_size);
-
-    printf("[VM %d] Loaded %zu bytes of guest code at GPA 0x%x\n",
-           vm->id, code_size, GUEST_CODE_ADDR);
 
     return 0;
 }
@@ -389,50 +586,42 @@ static int load_guest(vm_state_t *vm) {
  * Hypercalls use the HVC instruction in ARM64. When the guest executes HVC,
  * we get an exception and can read the guest's registers to see what it wants.
  */
-static int handle_hypercall(vm_state_t *vm) {
+static int handle_hypercall(vm_state_t *vm, int vcpu_idx) {
     uint64_t x0, x1, pc;
-    // static int call_count = 0;
+    hv_vcpu_t vcpu = vm->vcpus[vcpu_idx];
 
     /* Read hypercall number and argument */
-    hv_vcpu_get_reg(vm->vcpu, HV_REG_X0, &x0);
-    hv_vcpu_get_reg(vm->vcpu, HV_REG_X1, &x1);
-    hv_vcpu_get_reg(vm->vcpu, HV_REG_PC, &pc);
-
-    /* Debug: show first few hypercalls */
-    // if (call_count < 20) {
-    //     fprintf(stderr, "[DEBUG] Hypercall #%d: PC=0x%llx x0=%llu x1=0x%llx('%c')\n",
-    //             call_count, pc, x0, x1, (x1 >= 32 && x1 < 127) ? (char)x1 : '?');
-    // }
-    // call_count++;
+    hv_vcpu_get_reg(vcpu, HV_REG_X0, &x0);
+    hv_vcpu_get_reg(vcpu, HV_REG_X1, &x1);
+    hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc);
 
     switch (x0) {
         case HYPERCALL_EXIT:
-            printf("\n[VM %d] Guest requested exit\n", vm->id);
-            vm->running = false;
-            break;
+            return 1;  /* Signal this vCPU should stop */
 
         case HYPERCALL_PUTCHAR:
-            /* Print a single character */
+            /* Print a single character (lock for clean output) */
+            pthread_mutex_lock(&vm->lock);
             putchar((int)x1);
             fflush(stdout);
+            pthread_mutex_unlock(&vm->lock);
             break;
 
         case HYPERCALL_PUTS:
             /* Print a string from guest memory */
-            {
-                if (x1 < vm->mem_size) {
-                    const char *str = (const char *)vm->mem + x1;
-                    printf("%s", str);
-                }
+            pthread_mutex_lock(&vm->lock);
+            if (x1 < vm->mem_size) {
+                const char *str = (const char *)vm->mem + x1;
+                printf("%s", str);
             }
+            pthread_mutex_unlock(&vm->lock);
             break;
 
         default:
-            printf("[VM %d] Unknown hypercall %llu at PC=0x%llx\n", vm->id, x0, pc);
+            printf("[VM %d vCPU %d] Unknown hypercall %llu at PC=0x%llx\n",
+                   vm->id, vcpu_idx, x0, pc);
             break;
     }
-
-    /* Note: PC already points past the HVC instruction after trap */
 
     return 0;
 }
@@ -447,58 +636,58 @@ static int handle_hypercall(vm_state_t *vm) {
  * - Memory access faults
  * - Interrupts
  */
-static int handle_exit(vm_state_t *vm) {
-    hv_vcpu_exit_t *exit = vm->vcpu_exit;
+static int handle_exit(vm_state_t *vm, int vcpu_idx) {
+    hv_vcpu_exit_t *exit = vm->vcpu_exits[vcpu_idx];
+    hv_vcpu_t vcpu = vm->vcpus[vcpu_idx];
 
     switch (exit->reason) {
         case HV_EXIT_REASON_EXCEPTION: {
             uint32_t ec = ESR_EC(exit->exception.syndrome);
             uint64_t pc;
-            hv_vcpu_get_reg(vm->vcpu, HV_REG_PC, &pc);
+            hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc);
 
             switch (ec) {
                 case EC_HVC64:
                     /* Hypervisor call - this is our communication channel */
-                    return handle_hypercall(vm);
+                    return handle_hypercall(vm, vcpu_idx);
 
                 case EC_SYS64:
                     /* System register access - for now, just skip */
-                    printf("[VM %d] System register access at PC=0x%llx, skipping\n", vm->id, pc);
-                    hv_vcpu_set_reg(vm->vcpu, HV_REG_PC, pc + 4);
+                    printf("[VM %d vCPU %d] System register access at PC=0x%llx, skipping\n",
+                           vm->id, vcpu_idx, pc);
+                    hv_vcpu_set_reg(vcpu, HV_REG_PC, pc + 4);
                     break;
 
                 case EC_DABORT_LOWER:
-                    printf("[VM %d] Data abort at PC=0x%llx, fault addr=0x%llx\n",
-                           vm->id, pc, exit->exception.virtual_address);
-                    vm->running = false;
+                    printf("[VM %d vCPU %d] Data abort at PC=0x%llx, fault addr=0x%llx\n",
+                           vm->id, vcpu_idx, pc, exit->exception.virtual_address);
                     return -1;
 
                 case EC_IABORT_LOWER:
-                    printf("[VM %d] Instruction abort at PC=0x%llx\n", vm->id, pc);
-                    vm->running = false;
+                    printf("[VM %d vCPU %d] Instruction abort at PC=0x%llx\n",
+                           vm->id, vcpu_idx, pc);
                     return -1;
 
                 default:
-                    printf("[VM %d] Unhandled exception EC=0x%x at PC=0x%llx\n", vm->id, ec, pc);
-                    printf("[VM %d] Syndrome=0x%llx\n", vm->id, exit->exception.syndrome);
-                    vm->running = false;
+                    printf("[VM %d vCPU %d] Unhandled exception EC=0x%x at PC=0x%llx\n",
+                           vm->id, vcpu_idx, ec, pc);
+                    printf("[VM %d vCPU %d] Syndrome=0x%llx\n",
+                           vm->id, vcpu_idx, exit->exception.syndrome);
                     return -1;
             }
             break;
         }
 
         case HV_EXIT_REASON_CANCELED:
-            printf("[VM %d] vCPU execution canceled\n", vm->id);
-            vm->running = false;
-            break;
+            printf("[VM %d vCPU %d] vCPU execution canceled\n", vm->id, vcpu_idx);
+            return 1;
 
         case HV_EXIT_REASON_VTIMER_ACTIVATED:
             /* Virtual timer fired - we don't use it, just continue */
             break;
 
         default:
-            printf("[VM %d] Unknown exit reason: %d\n", vm->id, exit->reason);
-            vm->running = false;
+            printf("[VM %d vCPU %d] Unknown exit reason: %d\n", vm->id, vcpu_idx, exit->reason);
             return -1;
     }
 
@@ -506,27 +695,127 @@ static int handle_exit(vm_state_t *vm) {
 }
 
 /*
+ * Initialize a single vCPU (must be called from the thread that will run it)
+ */
+static int vcpu_init_single(vm_state_t *vm, int vcpu_idx) {
+    /* Create the vCPU in this thread */
+    hv_return_t ret = hv_vcpu_create(&vm->vcpus[vcpu_idx], &vm->vcpu_exits[vcpu_idx], NULL);
+    if (ret != HV_SUCCESS) {
+        fprintf(stderr, "[VM %d vCPU %d] hv_vcpu_create failed: %s\n",
+                vm->id, vcpu_idx, hv_strerror(ret));
+        return -1;
+    }
+
+    hv_vcpu_t vcpu = vm->vcpus[vcpu_idx];
+
+    /* Determine entry point and stack for this vCPU */
+    uint64_t pc_addr, sp_addr;
+    if (vm->id == 2) {
+        pc_addr = GUEST_CODE_ADDR + (vcpu_idx * GUEST_CODE2_OFFSET);
+        sp_addr = (vcpu_idx == 0) ? GUEST_STACK_ADDR : GUEST_STACK2_ADDR;
+    } else {
+        pc_addr = GUEST_CODE_ADDR;
+        sp_addr = GUEST_STACK_ADDR;
+    }
+
+    /* Program counter */
+    hv_vcpu_set_reg(vcpu, HV_REG_PC, pc_addr);
+    hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_SP_EL0, sp_addr);
+    hv_vcpu_set_reg(vcpu, HV_REG_CPSR, 0x3c5);
+
+    /* Clear and set registers */
+    for (int r = 0; r <= 30; r++) {
+        hv_vcpu_set_reg(vcpu, HV_REG_X0 + r, 0);
+    }
+    hv_vcpu_set_reg(vcpu, HV_REG_X20, vm->id);
+    hv_vcpu_set_reg(vcpu, HV_REG_X21, vcpu_idx);
+
+    printf("[VM %d] vCPU %d initialized: PC=0x%llx, SP=0x%llx\n",
+           vm->id, vcpu_idx, pc_addr, sp_addr);
+
+    return 0;
+}
+
+/*
+ * vCPU thread function - creates and runs a single vCPU in its own thread
+ */
+static void *vcpu_thread_func(void *arg) {
+    vcpu_thread_ctx_t *ctx = (vcpu_thread_ctx_t *)arg;
+    vm_state_t *vm = ctx->vm;
+    int vcpu_idx = ctx->vcpu_idx;
+
+    /* Create vCPU in this thread (required by Hypervisor.framework) */
+    if (vcpu_init_single(vm, vcpu_idx) < 0) {
+        return (void *)-1;
+    }
+
+    hv_vcpu_t vcpu = vm->vcpus[vcpu_idx];
+
+    while (1) {
+        /* Run the vCPU until it exits */
+        hv_return_t ret = hv_vcpu_run(vcpu);
+
+        if (ret != HV_SUCCESS) {
+            fprintf(stderr, "[VM %d vCPU %d] hv_vcpu_run failed: %s\n",
+                    vm->id, vcpu_idx, hv_strerror(ret));
+            return (void *)-1;
+        }
+
+        /* Handle the exit reason */
+        int result = handle_exit(vm, vcpu_idx);
+        if (result != 0) {
+            /* Exit requested or error */
+            break;
+        }
+    }
+
+    return NULL;
+}
+
+/*
  * Main VM execution loop
  */
 static int vm_run(vm_state_t *vm) {
-    printf("[VM %d] Starting guest execution...\n", vm->id);
+    printf("[VM %d] Starting guest execution (%d vCPU%s)...\n",
+           vm->id, vm->num_vcpus, vm->num_vcpus > 1 ? "s" : "");
     printf("[VM %d] --- Guest Output ---\n", vm->id);
 
     vm->running = true;
 
-    while (vm->running) {
-        /* Run the vCPU until it exits */
-        hv_return_t ret = hv_vcpu_run(vm->vcpu);
+    if (vm->num_vcpus == 1) {
+        /* Single vCPU: run directly in this thread */
+        hv_vcpu_t vcpu = vm->vcpus[0];
 
-        if (ret != HV_SUCCESS) {
-            fprintf(stderr, "[VM %d] hv_vcpu_run failed: %s\n", vm->id, hv_strerror(ret));
-            return -1;
+        while (vm->running) {
+            hv_return_t ret = hv_vcpu_run(vcpu);
+
+            if (ret != HV_SUCCESS) {
+                fprintf(stderr, "[VM %d] hv_vcpu_run failed: %s\n", vm->id, hv_strerror(ret));
+                return -1;
+            }
+
+            int result = handle_exit(vm, 0);
+            if (result != 0) {
+                vm->running = false;
+            }
+        }
+    } else {
+        /* Multiple vCPUs: run each in its own thread */
+        pthread_t threads[MAX_VCPUS];
+        vcpu_thread_ctx_t contexts[MAX_VCPUS];
+
+        for (int i = 0; i < vm->num_vcpus; i++) {
+            contexts[i].vm = vm;
+            contexts[i].vcpu_idx = i;
+            pthread_create(&threads[i], NULL, vcpu_thread_func, &contexts[i]);
         }
 
-        /* Handle the exit reason */
-        if (handle_exit(vm) < 0) {
-            return -1;
+        /* Wait for all vCPU threads to complete */
+        for (int i = 0; i < vm->num_vcpus; i++) {
+            pthread_join(threads[i], NULL);
         }
+
+        vm->running = false;
     }
 
     printf("[VM %d] --- End Guest Output ---\n", vm->id);
@@ -539,8 +828,10 @@ static int vm_run(vm_state_t *vm) {
 static void vm_destroy(vm_state_t *vm) {
     printf("[VM %d] Cleaning up...\n", vm->id);
 
-    if (vm->vcpu) {
-        hv_vcpu_destroy(vm->vcpu);
+    for (int i = 0; i < vm->num_vcpus; i++) {
+        if (vm->vcpus[i]) {
+            hv_vcpu_destroy(vm->vcpus[i]);
+        }
     }
 
     if (vm->mem) {
@@ -548,6 +839,7 @@ static void vm_destroy(vm_state_t *vm) {
         munmap(vm->mem, vm->mem_size);
     }
 
+    pthread_mutex_destroy(&vm->lock);
     hv_vm_destroy();
 
     printf("[VM %d] VM destroyed\n", vm->id);
@@ -560,6 +852,7 @@ static void vm_destroy(vm_state_t *vm) {
 static int run_single_vm(int vm_id) {
     vm_state_t vm = {0};
     vm.id = vm_id;
+    vm.num_vcpus = (vm_id == 1) ? 1 : 2;  /* VM 1: 1 vCPU, VM 2: 2 vCPUs */
     int result = 0;
 
     /* Initialize the VM */
