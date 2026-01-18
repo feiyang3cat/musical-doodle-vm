@@ -2,26 +2,61 @@
 
 A "Hello World" Virtual Machine Monitor (VMM) exploring how to create a tiny sandbox on macOS using Apple's Hypervisor.framework.
 
-Basic Reading
-- [MacOS Hypervisor](https://developer.apple.com/documentation/hypervisor)
-- [Firecracker](https://github.com/firecracker-microvm/firecracker)
 
-Extended Reading
-- Firecracker paper (nsdi20)
-- KVM paper (linux seminar)
+## Context Knowledge
+
+### basic terms
+
+**hodgepodge of terms**:
+Hypervisor, VMM, VM, GuestOS, BareMetal, MicroKernel, UniKernel, Monolithic Kernel, Hybrid Kernel
+Hypercalls, Systemcalls, Traps/Interrupts/Exceptions, Privilege Levels(mode/ring/exception level)
+
+**stacks**:
+| Traditional Stack                       | Virtualization Stack                              |
+| --------------------------------------- | ------------------------------------------------- |
+| Hardware                                | Hardware                                          |
+| OS (Kernel, e.g. Linux, macOS, Windows) | └── Hypervisor + VMM (often used interchangeably) |
+| Application                             | └── Virtual Machine (VM)                          |
+|                                         | └── Guest OS (e.g. Linux, Windows, etc.)          |
+| --------------------------------------- | ------------------------------------------------- |
+| Application                             | Application                                       |
+| ↓ syscall (trap to kernel)              | ↓ syscall (trap to kernel)                        |
+| OS / Kernel                             | Kernel (e.g. Guest OS)                            |
+| ↓ (directly on hardware)                | ↓ hypercall (trap to hypervisor)                  |
+| Hardware (CPU / Memory / Devices)       | Hypervisor                                        |
+|                                         | ↓ hardware instructions                           |
+|                                         | CPU / Memory / Devices                            |
+
+### basic problems to solve
+
+The management of multiple OSes in the same machine:
+- thread related
+- memory management
+- IO device management (a lot of work, devices)
+- Security
+- Performance
+
+### In-depth Reading
+    - [KVM paper](https://www.kernel.org/doc/ols/2007/ols2007v1-pages-225-230.pdf)
+    - [Firecracker paper](https://www.usenix.org/system/files/nsdi20-paper-wang-yonggang.pdf) (nsdi20)
+    - [MacOS Hypervisor](https://developer.apple.com/documentation/hypervisor)
+    - [Xen] (https://dl.acm.org/doi/10.1145/945445.945462)
+    - Others: Disco, Qemu, Wine
+
+### HYPERVISOR PARADIGM
+| Category         | Linux KVM                      | macOS Hypervisor            |
+| ---------------- | ------------------------------ | --------------------------- |
+| Architecture     | OS as Hyperversior, Monolithic | User Space API              |
+| Host OS          | Linux only                     | macOS only                  |
+| Code Size        | Large; part of Linux kernel    | Large; part of macOS kernel |
+| Hardware Drivers | Unified; uses Linux drivers    | Handled by macOS kernel     |
+| HW Support       | VT-x / AMD-V                   | VT-x (Intel) / ARM (Apple)  |
+| Isolation        | Process-level (strong)         | Sandbox-level (very strong) |
+
+![KVM vs Hypervisor.framework Comparison](kvm-vs-hypervisor.jpg)
 
 
-## What is this?
 
-TinyVMM is the simplest possible hypervisor that actually runs guest code. It runs **2 VMs in parallel**, each printing its own ID to demonstrate isolation. It demonstrates:
-
-- **VM Creation**: How to initialize virtual machine instances
-- **Memory Mapping**: Setting up guest physical address space
-- **vCPU Management**: Creating and configuring virtual CPUs
-- **Guest Execution**: Running ARM64 code in VMs
-- **VM Exits**: Handling when guests need VMM assistance
-- **Hypercalls**: A simple guest-to-host communication mechanism
-- **Multi-VM**: Running multiple isolated VMs using fork()
 
 ## Architecture Overview
 
@@ -106,10 +141,10 @@ What runs inside each VM (no guest OS!):
 
 ### Hypervisor vs VMM
 
-| Term | What it is | In this project |
-|------|------------|-----------------|
-| **Hypervisor** | System software that creates and manages VMs at the hardware level | macOS kernel + Hypervisor.framework (provided by Apple) |
-| **VMM (Virtual Machine Monitor)** | User-space program that controls a VM's lifecycle and handles its requests | TinyVMM (what we write) |
+| Term                              | What it is                                                                 | In this project                                         |
+| --------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Hypervisor**                    | System software that creates and manages VMs at the hardware level         | macOS kernel + Hypervisor.framework (provided by Apple) |
+| **VMM (Virtual Machine Monitor)** | User-space program that controls a VM's lifecycle and handles its requests | TinyVMM (what we write)                                 |
 
 The hypervisor provides the low-level capability; the VMM uses it to build a complete virtual environment.
 
@@ -152,13 +187,13 @@ hv_vcpu_run(vcpu);                         // Run until exit
 
 A VM exit occurs when guest execution must pause for the VMM to handle something:
 
-| Exit Cause | Example | VMM Response |
-|------------|---------|--------------|
-| **Hypercall (HVC)** | Guest wants to print a character | Read registers, perform action, resume |
-| **Memory fault** | Guest accessed unmapped address | Map memory or inject fault |
-| **System register access** | Guest read/wrote trapped register | Emulate the register |
-| **Interrupt** | Timer fired | Inject virtual interrupt |
-| **WFI/WFE** | Guest is idle, waiting | Yield CPU time |
+| Exit Cause                 | Example                           | VMM Response                           |
+| -------------------------- | --------------------------------- | -------------------------------------- |
+| **Hypercall (HVC)**        | Guest wants to print a character  | Read registers, perform action, resume |
+| **Memory fault**           | Guest accessed unmapped address   | Map memory or inject fault             |
+| **System register access** | Guest read/wrote trapped register | Emulate the register                   |
+| **Interrupt**              | Timer fired                       | Inject virtual interrupt               |
+| **WFI/WFE**                | Guest is idle, waiting            | Yield CPU time                         |
 
 The exit-handle-resume loop is the core of any VMM:
 ```
@@ -185,10 +220,10 @@ Guest (EL1)                         VMM (User-space)
 
 ### Guest Physical Address (GPA) vs Host Virtual Address (HVA)
 
-| Address Type | Who sees it | Example |
-|--------------|-------------|---------|
-| **GPA** (Guest Physical) | Guest code | `0x10000` (where guest thinks code is) |
-| **HVA** (Host Virtual) | VMM process | `0x102b24000` (actual malloc'd memory) |
+| Address Type             | Who sees it | Example                                |
+| ------------------------ | ----------- | -------------------------------------- |
+| **GPA** (Guest Physical) | Guest code  | `0x10000` (where guest thinks code is) |
+| **HVA** (Host Virtual)   | VMM process | `0x102b24000` (actual malloc'd memory) |
 
 The VMM maps HVA→GPA so the guest sees a contiguous address space starting at 0:
 
@@ -225,12 +260,12 @@ VHE is an ARM64 feature that lets the host kernel run at EL2 (hypervisor level) 
 └── RELEASE_NOTES.md    # Version history and changes
 ```
 
-| File | Description |
-|------|-------------|
-| `main.c` | The complete VMM implementation. Contains VM initialization, memory mapping, vCPU setup, the run loop, hypercall handlers, and embedded guest machine code. This is the main file to study. |
-| `guest.S` | Optional ARM64 assembly source for writing custom guest programs. You can modify this to experiment with different guest code, then assemble it with `make guest.bin`. |
-| `Makefile` | Build configuration that compiles the VMM, assembles guest code, and signs the binary with the required hypervisor entitlement. |
-| `entitlements.plist` | Declares the `com.apple.security.hypervisor` entitlement required by macOS to allow a process to use Hypervisor.framework. |
+| File                 | Description                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main.c`             | The complete VMM implementation. Contains VM initialization, memory mapping, vCPU setup, the run loop, hypercall handlers, and embedded guest machine code. This is the main file to study. |
+| `guest.S`            | Optional ARM64 assembly source for writing custom guest programs. You can modify this to experiment with different guest code, then assemble it with `make guest.bin`.                      |
+| `Makefile`           | Build configuration that compiles the VMM, assembles guest code, and signs the binary with the required hypervisor entitlement.                                                             |
+| `entitlements.plist` | Declares the `com.apple.security.hypervisor` entitlement required by macOS to allow a process to use Hypervisor.framework.                                                                  |
 
 ## Building & Running
 
@@ -347,11 +382,11 @@ hv_vcpu_set_reg(vcpu, HV_REG_PC, pc + 4);
 
 ## Hypercall Interface
 
-| Number | Name      | x1 Argument      | Description           |
-|--------|-----------|------------------|-----------------------|
-| 0      | EXIT      | (unused)         | Terminate the VM      |
-| 1      | PUTCHAR   | ASCII character  | Print a character     |
-| 2      | PUTS      | String address   | Print a string        |
+| Number | Name    | x1 Argument     | Description       |
+| ------ | ------- | --------------- | ----------------- |
+| 0      | EXIT    | (unused)        | Terminate the VM  |
+| 1      | PUTCHAR | ASCII character | Print a character |
+| 2      | PUTS    | String address  | Print a string    |
 
 ## Experimenting
 
@@ -374,15 +409,15 @@ Or load from file by modifying `load_guest()`.
 
 ## Comparison to Firecracker
 
-| Feature           | Firecracker                    | TinyVMM              |
-|-------------------|--------------------------------|----------------------|
-| Guest OS          | Full Linux kernel              | Bare metal code      |
-| Memory            | GBs, dynamic                   | 1MB, static          |
-| Devices           | virtio-net, virtio-blk, serial | None (hypercalls)    |
-| vCPUs             | Multiple                       | 1 per VM (2 VMs)     |
-| Boot              | Linux boot protocol            | Direct jump          |
-| Platform          | Linux KVM                      | macOS Hypervisor     |
-| Lines of code     | ~50,000                        | ~660                 |
+| Feature       | Firecracker                    | TinyVMM           |
+| ------------- | ------------------------------ | ----------------- |
+| Guest OS      | Full Linux kernel              | Bare metal code   |
+| Memory        | GBs, dynamic                   | 1MB, static       |
+| Devices       | virtio-net, virtio-blk, serial | None (hypercalls) |
+| vCPUs         | Multiple                       | 1 per VM (2 VMs)  |
+| Boot          | Linux boot protocol            | Direct jump       |
+| Platform      | Linux KVM                      | macOS Hypervisor  |
+| Lines of code | ~50,000                        | ~660              |
 
 ## Troubleshooting
 
