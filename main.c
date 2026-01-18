@@ -352,7 +352,7 @@ static int load_guest(vm_state_t *vm) {
  */
 static int handle_hypercall(vm_state_t *vm) {
     uint64_t x0, x1, pc;
-    static int call_count = 0;
+    // static int call_count = 0;
 
     /* Read hypercall number and argument */
     hv_vcpu_get_reg(vm->vcpu, HV_REG_X0, &x0);
@@ -360,11 +360,11 @@ static int handle_hypercall(vm_state_t *vm) {
     hv_vcpu_get_reg(vm->vcpu, HV_REG_PC, &pc);
 
     /* Debug: show first few hypercalls */
-    if (call_count < 20) {
-        fprintf(stderr, "[DEBUG] Hypercall #%d: PC=0x%llx x0=%llu x1=0x%llx('%c')\n",
-                call_count, pc, x0, x1, (x1 >= 32 && x1 < 127) ? (char)x1 : '?');
-    }
-    call_count++;
+    // if (call_count < 20) {
+    //     fprintf(stderr, "[DEBUG] Hypercall #%d: PC=0x%llx x0=%llu x1=0x%llx('%c')\n",
+    //             call_count, pc, x0, x1, (x1 >= 32 && x1 < 127) ? (char)x1 : '?');
+    // }
+    // call_count++;
 
     switch (x0) {
         case HYPERCALL_EXIT:
