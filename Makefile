@@ -23,6 +23,7 @@ all: $(TARGET) $(GUEST)
 
 $(TARGET): main.c
 	$(CC) $(CFLAGS) $(FRAMEWORKS) -o $@ $<
+	codesign --entitlements entitlements.plist -s - $@
 
 # Assemble guest code to raw binary
 guest.o: guest.S
