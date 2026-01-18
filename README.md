@@ -16,59 +16,62 @@ TinyVMM is the simplest possible hypervisor that actually runs guest code. It de
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Your macOS Process                       │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                      TinyVMM                          │  │
-│  │                                                       │  │
-│  │   ┌─────────────┐       ┌─────────────────────────┐  │  │
-│  │   │   VM Loop   │◄─────►│   Hypervisor.framework  │  │  │
-│  │   │             │       │   (Apple's API)          │  │  │
-│  │   │ - Run vCPU  │       └───────────┬─────────────┘  │  │
-│  │   │ - Handle    │                   │                │  │
-│  │   │   Exits     │                   ▼                │  │
-│  │   │ - Hypercalls│       ┌─────────────────────────┐  │  │
-│  │   └─────────────┘       │   macOS Hypervisor      │  │  │
-│  │                         │   (Kernel)               │  │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                                  │                           │
-└──────────────────────────────────┼───────────────────────────┘
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │   Apple Silicon Hardware    │
-                    │   (ARM64 Virtualization)    │
-                    └─────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    Your macOS Process                    │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │                      TinyVMM                       │  │
+│  │                                                    │  │
+│  │   ┌─────────────┐     ┌─────────────────────────┐  │  │
+│  │   │   VM Loop   │◄───►│  Hypervisor.framework   │  │  │
+│  │   │             │     │     (Apple's API)       │  │  │
+│  │   │ - Run vCPU  │     └───────────┬─────────────┘  │  │
+│  │   │ - Handle    │                 │                │  │
+│  │   │   Exits     │                 ▼                │  │
+│  │   │ - Hypercalls│     ┌─────────────────────────┐  │  │
+│  │   └─────────────┘     │    macOS Hypervisor     │  │  │
+│  │                       │        (Kernel)         │  │  │
+│  └───────────────────────┴─────────────────────────┴──┘  │
+└──────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                ┌─────────────────────────────┐
+                │   Apple Silicon Hardware    │
+                │   (ARM64 Virtualization)    │
+                └─────────────────────────────┘
 ```
 
 ## Requirements
 
 - macOS 11.0 (Big Sur) or later
-- Apple Silicon (M1/M2/M3)
+- Apple Silicon (M1/M2/M3/M4)
 - Xcode Command Line Tools (`xcode-select --install`)
 
-## Building
+## Project Structure
 
-```bash
-make
+```
+.
+├── main.c              # The VMM implementation (~400 lines)
+├── guest.S             # ARM64 assembly for guest code experiments
+├── Makefile            # Build system with signing support
+├── entitlements.plist  # macOS entitlement for hypervisor access
+├── README.md           # This documentation
+└── RELEASE_NOTES.md    # Version history and changes
 ```
 
-## Running
+| File | Description |
+|------|-------------|
+| `main.c` | The complete VMM implementation. Contains VM initialization, memory mapping, vCPU setup, the run loop, hypercall handlers, and embedded guest machine code. This is the main file to study. |
+| `guest.S` | Optional ARM64 assembly source for writing custom guest programs. You can modify this to experiment with different guest code, then assemble it with `make guest.bin`. |
+| `Makefile` | Build configuration that compiles the VMM, assembles guest code, and signs the binary with the required hypervisor entitlement. |
+| `entitlements.plist` | Declares the `com.apple.security.hypervisor` entitlement required by macOS to allow a process to use Hypervisor.framework. |
 
-The binary needs the `com.apple.security.hypervisor` entitlement:
-
-```bash
-# Sign with entitlement (required for hypervisor access)
-codesign --entitlements entitlements.plist --force -s - tinyvmm
-
-# Run
-./tinyvmm
-```
-
-Or use the convenience target:
+## Building & Running
 
 ```bash
 make run
 ```
+
+This builds the binary, signs it with the required `com.apple.security.hypervisor` entitlement, and runs it.
 
 ## Expected Output
 
@@ -86,7 +89,7 @@ make run
 [VMM] vCPU created with ID: 0
 [VMM] vCPU initialized: PC=0x10000, SP=0xff000
 [VMM] Loading guest code...
-[VMM] Loaded 240 bytes of guest code at GPA 0x10000
+[VMM] Loaded 248 bytes of guest code at GPA 0x10000
 [VMM] Starting guest execution...
 [VMM] --- Guest Output ---
 Hello from VM!
@@ -234,7 +237,7 @@ Or load from file by modifying `load_guest()`.
 
 ### "Denied (missing entitlement?)"
 
-Sign the binary with the hypervisor entitlement:
+The binary needs to be signed with the hypervisor entitlement. Running `make run` or `make` handles this automatically. If you're running the binary manually after modifying it:
 ```bash
 codesign --entitlements entitlements.plist --force -s - tinyvmm
 ```
