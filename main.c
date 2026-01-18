@@ -25,6 +25,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <sys/mman.h>
 #include <mach/mach_time.h>
 #include <Hypervisor/Hypervisor.h>
@@ -76,13 +79,13 @@ static const uint32_t guest_code[] = {
     /*
      * ARM64 instructions (little-endian)
      * Each instruction is 4 bytes
+     *
+     * Input: X20 contains VM ID (1 or 2), set by VMM before execution
      */
 
-    /* Entry point: set up and print hello message */
+    /* Print "Hello from VM " */
 
-    /* Print "Hello from TinyVMM guest!\n" using hypercalls */
-
-    /* Load 'H' into x1, hypercall PUTCHAR (x0=1) */
+    /* 'H' */
     0xd2800901,     /* mov x1, #'H' (0x48) */
     0xd2800020,     /* mov x0, #1 (HYPERCALL_PUTCHAR) */
     0xd4000002,     /* hvc #0 */
@@ -107,7 +110,7 @@ static const uint32_t guest_code[] = {
     0xd2800020,     /* mov x0, #1 */
     0xd4000002,     /* hvc #0 */
 
-    /* ' ' (space) */
+    /* ' ' */
     0xd2800401,     /* mov x1, #' ' (0x20) */
     0xd2800020,     /* mov x0, #1 */
     0xd4000002,     /* hvc #0 */
@@ -147,6 +150,17 @@ static const uint32_t guest_code[] = {
     0xd2800020,     /* mov x0, #1 */
     0xd4000002,     /* hvc #0 */
 
+    /* ' ' */
+    0xd2800401,     /* mov x1, #' ' (0x20) */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Print VM ID from X20: '0' + X20 */
+    0xd2800601,     /* mov x1, #'0' (0x30) */
+    0x8b140021,     /* add x1, x1, x20 */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
     /* '!' */
     0xd2800421,     /* mov x1, #'!' (0x21) */
     0xd2800020,     /* mov x0, #1 */
@@ -157,15 +171,40 @@ static const uint32_t guest_code[] = {
     0xd2800020,     /* mov x0, #1 */
     0xd4000002,     /* hvc #0 */
 
-    /* Now demonstrate a counter - print some numbers */
+    /* Counter loop: print "VM N: 0 1 2 3 4" */
 
-    /* Initialize counter in x19 (callee-saved) */
+    /* Print "VM " */
+    0xd2800ac1,     /* mov x1, #'V' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd28009a1,     /* mov x1, #'M' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Print VM ID */
+    0xd2800601,     /* mov x1, #'0' */
+    0x8b140021,     /* add x1, x1, x20 */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Print ": " */
+    0xd2800741,     /* mov x1, #':' (0x3a) */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    0xd2800401,     /* mov x1, #' ' */
+    0xd2800020,     /* mov x0, #1 */
+    0xd4000002,     /* hvc #0 */
+
+    /* Initialize counter in x19 */
     0xd2800013,     /* mov x19, #0 */
 
-    /* Loop start (offset 48 instructions * 4 = 192 bytes from start) */
-    /* loop: */
-
-    /* Print digit: '0' + counter */
+    /* loop: Print digit */
     0xd2800601,     /* mov x1, #'0' (0x30) */
     0x8b130021,     /* add x1, x1, x19 */
     0xd2800020,     /* mov x0, #1 */
@@ -176,26 +215,22 @@ static const uint32_t guest_code[] = {
     0xd2800020,     /* mov x0, #1 */
     0xd4000002,     /* hvc #0 */
 
-    /* Increment counter */
+    /* Increment and compare */
     0x91000673,     /* add x19, x19, #1 */
-
-    /* Compare with 5 */
     0xf100167f,     /* cmp x19, #5 */
-
-    /* Branch if less than (loop) - go back 9 instructions */
-    0x54fffeeb,     /* b.lt loop (branch back 9 instructions = -36 bytes) */
+    0x54fffeeb,     /* b.lt loop (-36 bytes, back 9 instructions) */
 
     /* Print newline */
     0xd2800141,     /* mov x1, #'\n' */
     0xd2800020,     /* mov x0, #1 */
     0xd4000002,     /* hvc #0 */
 
-    /* Exit: hypercall 0 */
+    /* Exit */
     0xd2800000,     /* mov x0, #0 (HYPERCALL_EXIT) */
     0xd4000002,     /* hvc #0 */
 
-    /* Infinite loop (should never reach here) */
-    0x14000000,     /* b . (branch to self) */
+    /* Infinite loop (should never reach) */
+    0x14000000,     /* b . */
 };
 
 /* ============================================================================
@@ -203,6 +238,7 @@ static const uint32_t guest_code[] = {
  * ============================================================================ */
 
 typedef struct {
+    int id;                     /* VM identifier (1 or 2) */
     void *mem;                  /* Guest memory (host virtual address) */
     size_t mem_size;            /* Size of guest memory */
     hv_vcpu_t vcpu;             /* vCPU handle */
@@ -245,11 +281,11 @@ static const char *hv_strerror(hv_return_t ret) {
  * Initialize the VM: create VM instance and allocate guest memory
  */
 static int vm_init(vm_state_t *vm) {
-    printf("[VMM] Creating virtual machine...\n");
+    printf("[VM %d] Creating virtual machine...\n", vm->id);
 
     /* Step 1: Create the VM instance for this process */
     HV_CHECK(hv_vm_create(NULL));
-    printf("[VMM] VM created successfully\n");
+    printf("[VM %d] VM created successfully\n", vm->id);
 
     /* Step 2: Allocate guest memory
      * We use mmap to get page-aligned memory that can be mapped into the guest
@@ -264,15 +300,15 @@ static int vm_init(vm_state_t *vm) {
         hv_vm_destroy();
         return -1;
     }
-    printf("[VMM] Allocated %zu KB guest memory at %p\n",
-           vm->mem_size / 1024, vm->mem);
+    printf("[VM %d] Allocated %zu KB guest memory at %p\n",
+           vm->id, vm->mem_size / 1024, vm->mem);
 
     /* Step 3: Map the host memory into guest physical address space
      * The guest will see this memory starting at IPA (Intermediate Physical Address) 0
      */
     HV_CHECK(hv_vm_map(vm->mem, 0, vm->mem_size,
                        HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
-    printf("[VMM] Mapped guest memory: GPA 0x0 - 0x%zx\n", vm->mem_size);
+    printf("[VM %d] Mapped guest memory: GPA 0x0 - 0x%zx\n", vm->id, vm->mem_size);
 
     return 0;
 }
@@ -281,13 +317,13 @@ static int vm_init(vm_state_t *vm) {
  * Create and configure the vCPU
  */
 static int vcpu_init(vm_state_t *vm) {
-    printf("[VMM] Creating vCPU...\n");
+    printf("[VM %d] Creating vCPU...\n", vm->id);
 
     /* Create the vCPU
      * The exit pointer will be filled in by the framework
      */
     HV_CHECK(hv_vcpu_create(&vm->vcpu, &vm->vcpu_exit, NULL));
-    printf("[VMM] vCPU created with ID: %llu\n", vm->vcpu);
+    printf("[VM %d] vCPU created\n", vm->id);
 
     /* Set up initial register state
      *
@@ -316,8 +352,11 @@ static int vcpu_init(vm_state_t *vm) {
         HV_CHECK(hv_vcpu_set_reg(vm->vcpu, HV_REG_X0 + i, 0));
     }
 
-    printf("[VMM] vCPU initialized: PC=0x%x, SP=0x%x\n",
-           GUEST_CODE_ADDR, GUEST_STACK_ADDR);
+    /* Set X20 to VM ID so guest can identify itself */
+    HV_CHECK(hv_vcpu_set_reg(vm->vcpu, HV_REG_X20, vm->id));
+
+    printf("[VM %d] vCPU initialized: PC=0x%x, SP=0x%x\n",
+           vm->id, GUEST_CODE_ADDR, GUEST_STACK_ADDR);
 
     return 0;
 }
@@ -326,20 +365,20 @@ static int vcpu_init(vm_state_t *vm) {
  * Load guest code into VM memory
  */
 static int load_guest(vm_state_t *vm) {
-    printf("[VMM] Loading guest code...\n");
+    printf("[VM %d] Loading guest code...\n", vm->id);
 
     /* Copy guest code to the appropriate location in guest memory */
     size_t code_size = sizeof(guest_code);
 
     if (GUEST_CODE_ADDR + code_size > vm->mem_size) {
-        fprintf(stderr, "Error: Guest code too large\n");
+        fprintf(stderr, "[VM %d] Error: Guest code too large\n", vm->id);
         return -1;
     }
 
     memcpy((uint8_t *)vm->mem + GUEST_CODE_ADDR, guest_code, code_size);
 
-    printf("[VMM] Loaded %zu bytes of guest code at GPA 0x%x\n",
-           code_size, GUEST_CODE_ADDR);
+    printf("[VM %d] Loaded %zu bytes of guest code at GPA 0x%x\n",
+           vm->id, code_size, GUEST_CODE_ADDR);
 
     return 0;
 }
@@ -368,7 +407,7 @@ static int handle_hypercall(vm_state_t *vm) {
 
     switch (x0) {
         case HYPERCALL_EXIT:
-            printf("\n[VMM] Guest requested exit\n");
+            printf("\n[VM %d] Guest requested exit\n", vm->id);
             vm->running = false;
             break;
 
@@ -389,7 +428,7 @@ static int handle_hypercall(vm_state_t *vm) {
             break;
 
         default:
-            printf("[VMM] Unknown hypercall %llu at PC=0x%llx\n", x0, pc);
+            printf("[VM %d] Unknown hypercall %llu at PC=0x%llx\n", vm->id, x0, pc);
             break;
     }
 
@@ -424,24 +463,24 @@ static int handle_exit(vm_state_t *vm) {
 
                 case EC_SYS64:
                     /* System register access - for now, just skip */
-                    printf("[VMM] System register access at PC=0x%llx, skipping\n", pc);
+                    printf("[VM %d] System register access at PC=0x%llx, skipping\n", vm->id, pc);
                     hv_vcpu_set_reg(vm->vcpu, HV_REG_PC, pc + 4);
                     break;
 
                 case EC_DABORT_LOWER:
-                    printf("[VMM] Data abort at PC=0x%llx, fault addr=0x%llx\n",
-                           pc, exit->exception.virtual_address);
+                    printf("[VM %d] Data abort at PC=0x%llx, fault addr=0x%llx\n",
+                           vm->id, pc, exit->exception.virtual_address);
                     vm->running = false;
                     return -1;
 
                 case EC_IABORT_LOWER:
-                    printf("[VMM] Instruction abort at PC=0x%llx\n", pc);
+                    printf("[VM %d] Instruction abort at PC=0x%llx\n", vm->id, pc);
                     vm->running = false;
                     return -1;
 
                 default:
-                    printf("[VMM] Unhandled exception EC=0x%x at PC=0x%llx\n", ec, pc);
-                    printf("[VMM] Syndrome=0x%llx\n", exit->exception.syndrome);
+                    printf("[VM %d] Unhandled exception EC=0x%x at PC=0x%llx\n", vm->id, ec, pc);
+                    printf("[VM %d] Syndrome=0x%llx\n", vm->id, exit->exception.syndrome);
                     vm->running = false;
                     return -1;
             }
@@ -449,7 +488,7 @@ static int handle_exit(vm_state_t *vm) {
         }
 
         case HV_EXIT_REASON_CANCELED:
-            printf("[VMM] vCPU execution canceled\n");
+            printf("[VM %d] vCPU execution canceled\n", vm->id);
             vm->running = false;
             break;
 
@@ -458,7 +497,7 @@ static int handle_exit(vm_state_t *vm) {
             break;
 
         default:
-            printf("[VMM] Unknown exit reason: %d\n", exit->reason);
+            printf("[VM %d] Unknown exit reason: %d\n", vm->id, exit->reason);
             vm->running = false;
             return -1;
     }
@@ -470,8 +509,8 @@ static int handle_exit(vm_state_t *vm) {
  * Main VM execution loop
  */
 static int vm_run(vm_state_t *vm) {
-    printf("[VMM] Starting guest execution...\n");
-    printf("[VMM] --- Guest Output ---\n");
+    printf("[VM %d] Starting guest execution...\n", vm->id);
+    printf("[VM %d] --- Guest Output ---\n", vm->id);
 
     vm->running = true;
 
@@ -480,7 +519,7 @@ static int vm_run(vm_state_t *vm) {
         hv_return_t ret = hv_vcpu_run(vm->vcpu);
 
         if (ret != HV_SUCCESS) {
-            fprintf(stderr, "[VMM] hv_vcpu_run failed: %s\n", hv_strerror(ret));
+            fprintf(stderr, "[VM %d] hv_vcpu_run failed: %s\n", vm->id, hv_strerror(ret));
             return -1;
         }
 
@@ -490,7 +529,7 @@ static int vm_run(vm_state_t *vm) {
         }
     }
 
-    printf("[VMM] --- End Guest Output ---\n");
+    printf("[VM %d] --- End Guest Output ---\n", vm->id);
     return 0;
 }
 
@@ -498,7 +537,7 @@ static int vm_run(vm_state_t *vm) {
  * Clean up VM resources
  */
 static void vm_destroy(vm_state_t *vm) {
-    printf("[VMM] Cleaning up...\n");
+    printf("[VM %d] Cleaning up...\n", vm->id);
 
     if (vm->vcpu) {
         hv_vcpu_destroy(vm->vcpu);
@@ -511,25 +550,21 @@ static void vm_destroy(vm_state_t *vm) {
 
     hv_vm_destroy();
 
-    printf("[VMM] VM destroyed\n");
+    printf("[VM %d] VM destroyed\n", vm->id);
 }
 
 /* ============================================================================
- * Main Entry Point
+ * Single VM Runner (called in child process)
  * ============================================================================ */
 
-int main(void) {
+static int run_single_vm(int vm_id) {
     vm_state_t vm = {0};
+    vm.id = vm_id;
     int result = 0;
-
-    printf("╔════════════════════════════════════════╗\n");
-    printf("║   TinyVMM - macOS Hypervisor Demo      ║\n");
-    printf("║   A minimal VMM for learning           ║\n");
-    printf("╚════════════════════════════════════════╝\n\n");
 
     /* Initialize the VM */
     if (vm_init(&vm) < 0) {
-        fprintf(stderr, "\nFailed to initialize VM.\n");
+        fprintf(stderr, "\n[VM %d] Failed to initialize VM.\n", vm_id);
         fprintf(stderr, "Make sure you have the hypervisor entitlement.\n");
         fprintf(stderr, "For development, run: codesign --entitlements entitlements.plist -s - tinyvmm\n");
         return 1;
@@ -554,8 +589,73 @@ int main(void) {
     vm_destroy(&vm);
 
     if (result == 0) {
-        printf("\n[VMM] Guest completed successfully!\n");
+        printf("\n[VM %d] Guest completed successfully!\n", vm_id);
     }
 
     return result < 0 ? 1 : 0;
+}
+
+/* ============================================================================
+ * Main Entry Point
+ * ============================================================================ */
+
+int main(void) {
+    pid_t pid1, pid2;
+    int status1, status2;
+
+    printf("╔════════════════════════════════════════╗\n");
+    printf("║   TinyVMM - macOS Hypervisor Demo      ║\n");
+    printf("║   Running 2 VMs in parallel            ║\n");
+    printf("╚════════════════════════════════════════╝\n\n");
+    fflush(stdout);
+
+    /*
+     * Fork two child processes, each running its own VM.
+     * Apple's Hypervisor.framework allows one VM per process,
+     * so we use separate processes for true isolation.
+     */
+
+    /* Fork first child for VM 1 */
+    pid1 = fork();
+    if (pid1 < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (pid1 == 0) {
+        /* Child process 1: Run VM 1 */
+        return run_single_vm(1);
+    }
+
+    /* Fork second child for VM 2 */
+    pid2 = fork();
+    if (pid2 < 0) {
+        perror("fork");
+        /* Kill first child if second fork fails */
+        kill(pid1, SIGTERM);
+        waitpid(pid1, NULL, 0);
+        return 1;
+    }
+    if (pid2 == 0) {
+        /* Child process 2: Run VM 2 */
+        return run_single_vm(2);
+    }
+
+    /* Parent process: Wait for both VMs to complete */
+    printf("[Parent] Started VM 1 (PID %d) and VM 2 (PID %d)\n", pid1, pid2);
+    printf("[Parent] Waiting for VMs to complete...\n\n");
+
+    waitpid(pid1, &status1, 0);
+    waitpid(pid2, &status2, 0);
+
+    printf("\n[Parent] Both VMs finished.\n");
+
+    /* Return success only if both VMs succeeded */
+    if (WIFEXITED(status1) && WEXITSTATUS(status1) == 0 &&
+        WIFEXITED(status2) && WEXITSTATUS(status2) == 0) {
+        printf("[Parent] All VMs completed successfully!\n");
+        return 0;
+    } else {
+        printf("[Parent] One or more VMs failed.\n");
+        return 1;
+    }
 }

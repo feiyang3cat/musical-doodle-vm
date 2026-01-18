@@ -2,8 +2,10 @@
 triple:          'arm64-apple-darwin'
 binary-path:     tinyvmm
 relocations:
-  - { offsetInCU: 0x26, offset: 0x26, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x0, symBinAddr: 0x100002E58, symSize: 0x7D4 }
-  - { offsetInCU: 0x4D, offset: 0x4D, size: 0x8, addend: 0x0, symName: _guest_code, symObjAddr: 0x7F8, symBinAddr: 0x100003734, symSize: 0x0 }
-  - { offsetInCU: 0x81E, offset: 0x81E, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x0, symBinAddr: 0x100002E58, symSize: 0x7D4 }
-  - { offsetInCU: 0xDEC, offset: 0xDEC, size: 0x8, addend: 0x0, symName: _main.cold.1, symObjAddr: 0x7D4, symBinAddr: 0x10000362C, symSize: 0x1C }
+  - { offsetInCU: 0x26, offset: 0x26, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x0, symBinAddr: 0x100002A6C, symSize: 0x13C }
+  - { offsetInCU: 0x4D, offset: 0x4D, size: 0x8, addend: 0x0, symName: _guest_code, symObjAddr: 0xA0C, symBinAddr: 0x10000358C, symSize: 0x0 }
+  - { offsetInCU: 0x53A, offset: 0x53A, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0x0, symBinAddr: 0x100002A6C, symSize: 0x13C }
+  - { offsetInCU: 0x868, offset: 0x868, size: 0x8, addend: 0x0, symName: _run_single_vm, symObjAddr: 0x13C, symBinAddr: 0x100002BA8, symSize: 0x86C }
+  - { offsetInCU: 0xD8C, offset: 0xD8C, size: 0x8, addend: 0x0, symName: _main.cold.1, symObjAddr: 0x9A8, symBinAddr: 0x100003414, symSize: 0x40 }
+  - { offsetInCU: 0x1193, offset: 0x1193, size: 0x8, addend: 0x0, symName: _run_single_vm.cold.1, symObjAddr: 0x9E8, symBinAddr: 0x100003454, symSize: 0x1C }
 ...

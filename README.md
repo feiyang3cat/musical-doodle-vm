@@ -1,17 +1,27 @@
 # TinyVMM - A Minimal Hypervisor for macOS
 
-A "Hello World" Virtual Machine Monitor (VMM) demonstrating how to create a tiny sandbox on macOS using Apple's Hypervisor.framework. This is an educational project inspired by [Firecracker](https://github.com/firecracker-microvm/firecracker), simplified to its bare essentials.
+A "Hello World" Virtual Machine Monitor (VMM) exploring how to create a tiny sandbox on macOS using Apple's Hypervisor.framework.
+
+Basic Reading
+- [MacOS Hypervisor](https://developer.apple.com/documentation/hypervisor)
+- [Firecracker](https://github.com/firecracker-microvm/firecracker)
+
+Extended Reading
+- Firecracker paper (nsdi20)
+- KVM paper (linux seminar)
+
 
 ## What is this?
 
-TinyVMM is the simplest possible hypervisor that actually runs guest code. It demonstrates:
+TinyVMM is the simplest possible hypervisor that actually runs guest code. It runs **2 VMs in parallel**, each printing its own ID to demonstrate isolation. It demonstrates:
 
-- **VM Creation**: How to initialize a virtual machine instance
+- **VM Creation**: How to initialize virtual machine instances
 - **Memory Mapping**: Setting up guest physical address space
-- **vCPU Management**: Creating and configuring a virtual CPU
-- **Guest Execution**: Running ARM64 code in the VM
-- **VM Exits**: Handling when the guest needs VMM assistance
+- **vCPU Management**: Creating and configuring virtual CPUs
+- **Guest Execution**: Running ARM64 code in VMs
+- **VM Exits**: Handling when guests need VMM assistance
 - **Hypercalls**: A simple guest-to-host communication mechanism
+- **Multi-VM**: Running multiple isolated VMs using fork()
 
 ## Architecture Overview
 
@@ -207,7 +217,7 @@ VHE is an ARM64 feature that lets the host kernel run at EL2 (hypervisor level) 
 
 ```
 .
-├── main.c              # The VMM implementation (~400 lines)
+├── main.c              # The VMM implementation (~660 lines)
 ├── guest.S             # ARM64 assembly for guest code experiments
 ├── Makefile            # Build system with signing support
 ├── entitlements.plist  # macOS entitlement for hypervisor access
@@ -235,29 +245,41 @@ This builds the binary, signs it with the required `com.apple.security.hyperviso
 ```
 ╔════════════════════════════════════════╗
 ║   TinyVMM - macOS Hypervisor Demo      ║
-║   A minimal VMM for learning           ║
+║   Running 2 VMs in parallel            ║
 ╚════════════════════════════════════════╝
 
-[VMM] Creating virtual machine...
-[VMM] VM created successfully
-[VMM] Allocated 1024 KB guest memory at 0x...
-[VMM] Mapped guest memory: GPA 0x0 - 0x100000
-[VMM] Creating vCPU...
-[VMM] vCPU created with ID: 0
-[VMM] vCPU initialized: PC=0x10000, SP=0xff000
-[VMM] Loading guest code...
-[VMM] Loaded 248 bytes of guest code at GPA 0x10000
-[VMM] Starting guest execution...
-[VMM] --- Guest Output ---
-Hello from VM!
-0 1 2 3 4
+[VM 1] Creating virtual machine...
+[VM 1] VM created successfully
+[VM 1] Allocated 1024 KB guest memory at 0x...
+[VM 1] Mapped guest memory: GPA 0x0 - 0x100000
+[VM 1] Creating vCPU...
+[VM 1] vCPU created
+[VM 1] vCPU initialized: PC=0x10000, SP=0xff000
+[VM 1] Loading guest code...
+[VM 1] Loaded 352 bytes of guest code at GPA 0x10000
+[VM 1] Starting guest execution...
+[VM 1] --- Guest Output ---
+Hello from VM 1!
+VM 1: 0 1 2 3 4
 
-[VMM] Guest requested exit
-[VMM] --- End Guest Output ---
-[VMM] Cleaning up...
-[VMM] VM destroyed
+[VM 1] Guest requested exit
+[VM 1] --- End Guest Output ---
+[VM 1] Cleaning up...
+[VM 1] VM destroyed
 
-[VMM] Guest completed successfully!
+[VM 1] Guest completed successfully!
+[VM 2] Creating virtual machine...
+[VM 2] VM created successfully
+...
+Hello from VM 2!
+VM 2: 0 1 2 3 4
+...
+[VM 2] Guest completed successfully!
+[Parent] Started VM 1 (PID ...) and VM 2 (PID ...)
+[Parent] Waiting for VMs to complete...
+
+[Parent] Both VMs finished.
+[Parent] All VMs completed successfully!
 ```
 
 ## Code Walkthrough
@@ -357,10 +379,10 @@ Or load from file by modifying `load_guest()`.
 | Guest OS          | Full Linux kernel              | Bare metal code      |
 | Memory            | GBs, dynamic                   | 1MB, static          |
 | Devices           | virtio-net, virtio-blk, serial | None (hypercalls)    |
-| vCPUs             | Multiple                       | Single               |
+| vCPUs             | Multiple                       | 1 per VM (2 VMs)     |
 | Boot              | Linux boot protocol            | Direct jump          |
 | Platform          | Linux KVM                      | macOS Hypervisor     |
-| Lines of code     | ~50,000                        | ~400                 |
+| Lines of code     | ~50,000                        | ~660                 |
 
 ## Troubleshooting
 
