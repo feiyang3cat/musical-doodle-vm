@@ -13,6 +13,7 @@ Learning and Hello World Project for Hypervisor/VMM/Sandbox Development.
 - [Chapter 2: Projects](#chapter-2-projects)
   - [2.1 Learning the Firecracker Solution](#21-learning-the-firecracker-solution)
   - [2.2 macOS Hello World - TinyVMM](#22-macos-hello-world---tinyvmm)
+- [Contributors](#contributors)
 
 ---
 
@@ -105,3 +106,15 @@ Managing multiple OSes on the same machine:
 ### 2.2 macOS Hello World - TinyVMM
 
 See the [tinyvmm/](./tinyvmm/) folder for a minimal VMM implementation using macOS Hypervisor.framework.
+
+---
+
+## Contributors
+
+<!-- ALL-CONTRIBUTORS-LIST:START -->
+<table>
+  <tr>
+    <td align="center"><a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/203141299?v=4" width="100px;" alt=""/><br /><sub><b>Claude</b></sub></a><br />AI Pair Programmer</td>
+  </tr>
+</table>
+<!-- ALL-CONTRIBUTORS-LIST:END -->
